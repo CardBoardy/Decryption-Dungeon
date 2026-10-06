@@ -477,6 +477,7 @@ async def main():
 
     # ── Fonts ────────────────────────────────────────────────────────────────
     font_input = pygame.font.Font(FONT_PATH, 35)
+    font_small = pygame.font.Font(FONT_PATH, 22)
 
     # ── Shared objects ───────────────────────────────────────────────────────
     wizard = Character(60, 400, wizard_images, text_box_image, 437, 500)
@@ -518,6 +519,7 @@ async def main():
     )
 
     input_box1  = InputBox(900, 300, 600, 200, font_input)
+    enter_hint  = font_small.render("(Press enter when you think you cracked the code!)", True, FONT_COLOR)
     input_boxes = [input_box1]
 
     clock        = pygame.time.Clock()
@@ -598,8 +600,10 @@ async def main():
                     submitted_text = box.text
                     if stage == PUZZLE_STAGE and not answer_matches(submitted_text, decrypted):
                         wrong_answer_until = time.time() + 2
-            # The "next page" button only works once the puzzle is solved.
-            if button.check_click(event) and stage != PUZZLE_STAGE:
+            # Before the puzzle, the button continues; during it, nothing advances;
+            # once it's solved, a click anywhere turns the page.
+            clicked = event.type == pygame.MOUSEBUTTONDOWN and event.button == 1
+            if (stage < PUZZLE_STAGE and button.check_click(event)) or (stage > PUZZLE_STAGE and clicked):
                 stage += 1
 
         if stage >= 3 and stage < 5:
@@ -632,9 +636,11 @@ async def main():
 
         for box in input_boxes:
             text_layer.defer(box.draw)
+        if stage == PUZZLE_STAGE:
+            text_layer.blit(enter_hint, (input_box1.rect.x, input_box1.rect.bottom + 8))
         if time.time() < wrong_answer_until:
             hint = font_input.render("Not quite... try again!", True, (170, 60, 60))
-            text_layer.blit(hint, (input_box1.rect.x, input_box1.rect.bottom + 10))
+            text_layer.blit(hint, (input_box1.rect.x, input_box1.rect.bottom + 40))
 
         riddle.static(encrypted)
         name.static("Caesar cipher")
@@ -691,8 +697,10 @@ async def main():
                     submitted_text = box.text
                     if stage == PUZZLE_STAGE and not answer_matches(submitted_text, decrypted):
                         wrong_answer_until = time.time() + 2
-            # The "next page" button only works once the puzzle is solved.
-            if button.check_click(event) and stage != PUZZLE_STAGE:
+            # Before the puzzle, the button continues; during it, nothing advances;
+            # once it's solved, a click anywhere turns the page.
+            clicked = event.type == pygame.MOUSEBUTTONDOWN and event.button == 1
+            if (stage < PUZZLE_STAGE and button.check_click(event)) or (stage > PUZZLE_STAGE and clicked):
                 stage += 1
 
         if stage >= 3 and stage < 5:
@@ -725,9 +733,11 @@ async def main():
 
         for box in input_boxes:
             text_layer.defer(box.draw)
+        if stage == PUZZLE_STAGE:
+            text_layer.blit(enter_hint, (input_box1.rect.x, input_box1.rect.bottom + 8))
         if time.time() < wrong_answer_until:
             hint = font_input.render("Not quite... try again!", True, (170, 60, 60))
-            text_layer.blit(hint, (input_box1.rect.x, input_box1.rect.bottom + 10))
+            text_layer.blit(hint, (input_box1.rect.x, input_box1.rect.bottom + 40))
 
         riddle.static(encrypted)
         name.static("Null Cipher")
