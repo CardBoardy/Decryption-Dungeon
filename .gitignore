@@ -1,0 +1,3 @@
+# pygbag web build output (generated; the portfolio site hosts the playable copy)
+build/
+__pycache__/

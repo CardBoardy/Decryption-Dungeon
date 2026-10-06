@@ -1,3 +1,4 @@
+import asyncio  # lets the game run in a web browser via pygbag
 import pygame
 import sys
 import os
@@ -12,7 +13,7 @@ BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
 FRAMES_DIR = os.path.join(BASE_DIR, "images", "frames")   # frame_1.png … frame_65.png
 IMAGES_DIR = os.path.join(BASE_DIR, "images")             # Closed.png, Open.png, quill3.png,
                                                            # continue.png, nextpage.png, textbox.png
-FONT_PATH  = os.path.join(BASE_DIR, "WizardOfTheMoon-YG5y.ttf")
+FONT_PATH  = os.path.join(BASE_DIR, "fonts", "IMFellEnglish-Regular.ttf")  # readable old-book style (SIL OFL, see fonts/OFL.txt)
 FRAME_COUNT = 65
 
 # =============================================================================
@@ -80,11 +81,18 @@ def caesar_cipher(string, offset):
 def caesar_cipher_inverse(string, offset):
     return caesar_cipher(string, -offset)
 
+# In each puzzle scene, the stage where the player has to solve the cipher
+PUZZLE_STAGE = 3
+
+def answer_matches(submitted, answer):
+    """True if the typed answer is the decrypted message (ignoring case and extra spaces)."""
+    return ' '.join(submitted.lower().split()) == ' '.join(answer.lower().split())
+
 # =============================================================================
 # ANIMATION HELPER
 # =============================================================================
 
-def animation(frame_start, frame_end, pause_frames, fps, screen, layer, frames):
+async def animation(frame_start, frame_end, pause_frames, fps, screen, layer, frames):
     """Play frames[frame_start : frame_end]. Pauses at indices in pause_frames until SPACE."""
     width, height = screen.get_size()
     current_frame = frame_start
@@ -120,6 +128,7 @@ def animation(frame_start, frame_end, pause_frames, fps, screen, layer, frames):
         screen.blit(layer, (0, 0))
         pygame.display.flip()
         pygame.time.Clock().tick(fps)
+        await asyncio.sleep(0)  # give the browser a turn each frame
 
 # =============================================================================
 # CLASSES
@@ -363,7 +372,7 @@ class ImageButton:
 # MAIN
 # =============================================================================
 
-def main():
+async def main():
     pygame.init()
     pygame.mouse.set_visible(False)
 
@@ -386,7 +395,10 @@ def main():
 
     # ── Window (must come before convert_alpha) ───────────────────────────────
     width, height = frames[0].get_size()
-    screen = pygame.display.set_mode((width, height), pygame.RESIZABLE | pygame.SCALED)
+    # In a browser (pygbag), the page already scales the canvas, and SCALED/RESIZABLE
+    # aren't supported there; on desktop the window keeps its original behavior.
+    window_flags = 0 if sys.platform == "emscripten" else pygame.RESIZABLE | pygame.SCALED
+    screen = pygame.display.set_mode((width, height), window_flags)
     pygame.display.set_caption("Decryption Dungeon")
     cursor_image = cursor_image.convert_alpha()
 
@@ -460,7 +472,7 @@ def main():
     stage = 0
     button = ImageButton(0, 120, button_image, button_hover_image, wizard_text_layer)
 
-    animation(0, 1, [], 6, screen, background_layer, frames)
+    await animation(0, 1, [], 6, screen, background_layer, frames)
     wizard.show()
 
     while scene == 1 and game_running:
@@ -496,20 +508,21 @@ def main():
         refresh()
         pygame.display.flip()
         clock.tick(60)
+        await asyncio.sleep(0)  # give the browser a turn each frame
 
     # =========================================================================
     # SCENE 2 — Caesar Cipher puzzle
     # =========================================================================
     if game_running:
-        animation(0, 5, [], 6, screen, background_layer, frames)
-        animation(4, 31, [], 1000, screen, background_layer, frames)
+        await animation(0, 5, [], 6, screen, background_layer, frames)
+        await animation(4, 31, [], 1000, screen, background_layer, frames)
 
     stage          = 0
     decrypted      = random_sentence(words_bank, 5)
     encrypted      = caesar_cipher(decrypted, 3)
     submitted_text = ''
     been_here      = False
-    print("Caesar answer:", decrypted)
+    wrong_answer_until = 0
 
     button = ImageButton(0, 120, button_image, button_hover_image, wizard_text_layer)
 
@@ -524,10 +537,11 @@ def main():
                 box.handle_event(event)
                 if event.type == pygame.KEYDOWN and event.key == pygame.K_RETURN and box.active:
                     submitted_text = box.text
-                    print("Submitted:", submitted_text)
-            if button.check_click(event):
+                    if stage == PUZZLE_STAGE and not answer_matches(submitted_text, decrypted):
+                        wrong_answer_until = time.time() + 2
+            # The "next page" button only works once the puzzle is solved.
+            if button.check_click(event) and stage != PUZZLE_STAGE:
                 stage += 1
-                print("Stage:", stage)
 
         if stage >= 3 and stage < 5:
             button = ImageButton(1364, 610, button_image2, button_hover_image2, text_layer)
@@ -539,7 +553,7 @@ def main():
             stage = 0
             break
 
-        if (submitted_text == decrypted or submitted_text == 'hi') and not been_here:
+        if stage == PUZZLE_STAGE and answer_matches(submitted_text, decrypted) and not been_here:
             been_here = True
             stage += 1
 
@@ -548,14 +562,18 @@ def main():
         text_layer.fill((0, 0, 0, 0))
         wizard_text_layer.fill((0, 0, 0, 0))
 
-        button.check_hover()
-        button.draw()
+        if stage != PUZZLE_STAGE:  # "next page" appears once the puzzle is solved
+            button.check_hover()
+            button.draw()
 
         mx, my = pygame.mouse.get_pos()
         front_layer.blit(cursor_image, (mx - 6, my - 91))
 
         for box in input_boxes:
             box.draw(text_layer)
+        if time.time() < wrong_answer_until:
+            hint = font_input.render("Not quite... try again!", True, (170, 60, 60))
+            text_layer.blit(hint, (input_box1.rect.x, input_box1.rect.bottom + 10))
 
         riddle.static(encrypted)
         name.static("Ceaser cipher")
@@ -580,6 +598,7 @@ def main():
         refresh()
         pygame.display.flip()
         clock.tick(60)
+        await asyncio.sleep(0)  # give the browser a turn each frame
 
     # =========================================================================
     # SCENE 3 — Null Cipher puzzle
@@ -589,7 +608,7 @@ def main():
     encrypted      = null_cipher(decrypted)
     submitted_text = ''
     been_here      = False
-    print("Null answer:", decrypted)
+    wrong_answer_until = 0
 
     for box in input_boxes:
         box.reset()
@@ -597,9 +616,9 @@ def main():
     button = ImageButton(0, 120, button_image, button_hover_image, wizard_text_layer)
 
     if game_running:
-        animation(32, 58, [], 1000, screen, background_layer, frames)
-        animation(59, 65, [],    6, screen, background_layer, frames)
-        animation(4,  31, [], 1000, screen, background_layer, frames)
+        await animation(32, 58, [], 1000, screen, background_layer, frames)
+        await animation(59, 65, [],    6, screen, background_layer, frames)
+        await animation(4,  31, [], 1000, screen, background_layer, frames)
 
     while scene == 3 and game_running:
         for event in pygame.event.get():
@@ -609,10 +628,11 @@ def main():
                 box.handle_event(event)
                 if event.type == pygame.KEYDOWN and event.key == pygame.K_RETURN and box.active:
                     submitted_text = box.text
-                    print("Submitted:", submitted_text)
-            if button.check_click(event):
+                    if stage == PUZZLE_STAGE and not answer_matches(submitted_text, decrypted):
+                        wrong_answer_until = time.time() + 2
+            # The "next page" button only works once the puzzle is solved.
+            if button.check_click(event) and stage != PUZZLE_STAGE:
                 stage += 1
-                print("Stage:", stage)
 
         if stage >= 3 and stage < 5:
             button = ImageButton(1364, 610, button_image2, button_hover_image2, text_layer)
@@ -624,7 +644,7 @@ def main():
             stage = 0
             break
 
-        if submitted_text == decrypted and not been_here:
+        if stage == PUZZLE_STAGE and answer_matches(submitted_text, decrypted) and not been_here:
             been_here = True
             stage += 1
 
@@ -633,14 +653,18 @@ def main():
         text_layer.fill((0, 0, 0, 0))
         wizard_text_layer.fill((0, 0, 0, 0))
 
-        button.check_hover()
-        button.draw()
+        if stage != PUZZLE_STAGE:  # "next page" appears once the puzzle is solved
+            button.check_hover()
+            button.draw()
 
         mx, my = pygame.mouse.get_pos()
         front_layer.blit(cursor_image, (mx - 6, my - 91))
 
         for box in input_boxes:
             box.draw(text_layer)
+        if time.time() < wrong_answer_until:
+            hint = font_input.render("Not quite... try again!", True, (170, 60, 60))
+            text_layer.blit(hint, (input_box1.rect.x, input_box1.rect.bottom + 10))
 
         riddle.static(encrypted)
         name.static("Null Cipher")
@@ -665,6 +689,7 @@ def main():
         refresh()
         pygame.display.flip()
         clock.tick(60)
+        await asyncio.sleep(0)  # give the browser a turn each frame
 
     # =========================================================================
     # SCENE 4 — Closing monologue
@@ -680,7 +705,7 @@ def main():
     button = ImageButton(0, 120, button_image, button_hover_image, wizard_text_layer)
 
     if game_running:
-        animation(32, 58, [], 1000, screen, background_layer, frames)
+        await animation(32, 58, [], 1000, screen, background_layer, frames)
 
     wizard.show()
 
@@ -724,10 +749,11 @@ def main():
         refresh()
         pygame.display.flip()
         clock.tick(60)
+        await asyncio.sleep(0)  # give the browser a turn each frame
 
     pygame.quit()
     sys.exit()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

@@ -1,0 +1,56 @@
+# Builds the browser version of the game with pygbag and publishes it to
+# GitHub Pages (https://cardboardy.github.io/Decryption-Dungeon/) on every push to main.
+name: Deploy web version
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build with pygbag
+        run: |
+          pip install pygbag==0.9.3
+          python -m pygbag --build .
+
+      - name: Tidy the build
+        run: |
+          cd build/web
+          rm -f *.apk   # only used by itch.io
+          # Black page background instead of gray around the game
+          sed -i 's|body.style.background = "#7f7f7f"|body.style.background = "#000000"|' index.html
+
+      - name: Set up Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: build/web
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
