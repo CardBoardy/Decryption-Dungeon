@@ -122,9 +122,10 @@ async def animation(frame_start, frame_end, pause_frames, fps, screen, layer, fr
                 current_frame = frame_end - 1
                 break
 
-        layer.fill((0, 0, 0, 0))
-        scaled = pygame.transform.scale(frames[current_frame], (width, height))
-        layer.blit(scaled, (0, 0))
+        frame = frames[current_frame]
+        if frame.get_size() != (width, height):
+            frame = pygame.transform.scale(frame, (width, height))
+        layer.blit(frame, (0, 0))  # frames are opaque, so no need to clear first
         screen.blit(layer, (0, 0))
         pygame.display.flip()
         pygame.time.Clock().tick(fps)
@@ -133,6 +134,32 @@ async def animation(frame_start, frame_end, pause_frames, fps, screen, layer, fr
 # =============================================================================
 # CLASSES
 # =============================================================================
+
+class Layer:
+    """A drawing layer that remembers what was drawn on it this frame and paints
+    just those pieces onto the screen, instead of blending a full-screen
+    transparent surface. Much faster, especially in a web browser."""
+
+    def __init__(self):
+        self.commands = []
+
+    def blit(self, source, dest):
+        self.commands.append(("blit", source, dest))
+
+    def defer(self, draw):
+        """For widgets that draw shapes themselves: call draw(screen) at paint time."""
+        self.commands.append(("call", draw))
+
+    def fill(self, _color=None):
+        self.commands.clear()
+
+    def paint(self, screen):
+        for command in self.commands:
+            if command[0] == "blit":
+                screen.blit(command[1], command[2])
+            else:
+                command[1](screen)
+        self.commands.clear()  # every scene redraws its layers each frame
 
 class AppText:
     """Renders wrapped text onto a layer — static or typewriter-animated."""
@@ -156,35 +183,39 @@ class AppText:
         self.layer             = layer   # surface to draw onto
 
     def wrap_text(self, text):
-        words = text.split(' ')
         lines = []
-        current_line = ''
-        for word in words:
-            test_line = current_line + (' ' if current_line else '') + word
-            text_width, _ = self.font.size(test_line)
-            if text_width <= self.max_width:
-                current_line = test_line
-            else:
-                if current_line:
-                    lines.append(current_line)
-                current_line = word
-        if current_line:
-            lines.append(current_line)
+        for paragraph in text.split('\n'):  # a line break in the text starts a new line
+            words = paragraph.strip().split(' ')
+            current_line = ''
+            for word in words:
+                test_line = current_line + (' ' if current_line else '') + word
+                text_width, _ = self.font.size(test_line)
+                if text_width <= self.max_width:
+                    current_line = test_line
+                else:
+                    if current_line:
+                        lines.append(current_line)
+                    current_line = word
+            lines.append(current_line)  # an empty paragraph keeps a blank line
         return lines
 
     def static(self, text, x=None, y=None):
         x = self.original_x if x is None else x
         y = self.original_y if y is None else y
-        self.lines = self.wrap_text(text)
-        max_lines  = self.max_height // self.font.get_linesize()
-        displayed  = self.lines[:max_lines]
-        y_offset   = y
-        for line in displayed:
-            shadow  = self.font.render(line, True, self.shadow_color)
-            surface = self.font.render(line, True, self.font_color)
-            self.layer.blit(shadow,  (x + 1, y_offset + 1))
-            self.layer.blit(surface, (x, y_offset))
-            y_offset += self.font.get_linesize() + self.line_spacing
+        key = (text, x, y)
+        if getattr(self, "_static_key", None) != key:
+            # Only re-render when the text changes; otherwise reuse last frame's lines
+            self._static_key = key
+            self.lines = self.wrap_text(text)
+            max_lines  = self.max_height // self.font.get_linesize()
+            self._static_blits = []
+            y_offset = y
+            for line in self.lines[:max_lines]:
+                self._static_blits.append((self.font.render(line, True, self.shadow_color), (x + 1, y_offset + 1)))
+                self._static_blits.append((self.font.render(line, True, self.font_color), (x, y_offset)))
+                y_offset += self.font.get_linesize() + self.line_spacing
+        for surface, position in self._static_blits:
+            self.layer.blit(surface, position)
 
     def animated(self, text, character=None):
         if text != self.previous_text:
@@ -351,14 +382,22 @@ class ImageButton:
     """A clickable image button drawn onto a given layer."""
 
     def __init__(self, x, y, image, hover_image, layer):
-        self.image       = image
-        self.hover_image = hover_image
-        self.rect        = self.image.get_rect(topleft=(x, y))
+        self.rect        = image.get_rect(topleft=(x, y))  # clickable area: the full image
+        self.image,       self.image_offset = self._visible_part(image)
+        self.hover_image, self.hover_offset = self._visible_part(hover_image)
         self.is_hovered  = False
         self.layer       = layer
 
+    @staticmethod
+    def _visible_part(image):
+        """Crop away transparent margins so drawing doesn't blend a mostly empty image."""
+        bounds = image.get_bounding_rect()
+        return image.subsurface(bounds).copy(), bounds.topleft
+
     def draw(self):
-        self.layer.blit(self.hover_image if self.is_hovered else self.image, self.rect.topleft)
+        image, offset = ((self.hover_image, self.hover_offset) if self.is_hovered
+                         else (self.image, self.image_offset))
+        self.layer.blit(image, (self.rect.x + offset[0], self.rect.y + offset[1]))
 
     def check_click(self, event):
         return (event.type == pygame.MOUSEBUTTONDOWN and
@@ -400,22 +439,41 @@ async def main():
     window_flags = 0 if sys.platform == "emscripten" else pygame.RESIZABLE | pygame.SCALED
     screen = pygame.display.set_mode((width, height), window_flags)
     pygame.display.set_caption("Decryption Dungeon")
-    cursor_image = cursor_image.convert_alpha()
+
+    # Convert every image to the screen's pixel format once, so drawing them each
+    # frame is a straight copy instead of a per-pixel conversion.
+    frames             = [frame.convert() for frame in frames]
+    wizard_images      = [image.convert_alpha() for image in wizard_images]
+    cursor_image       = cursor_image.convert_alpha()
+
+    # Use the quill as a real system cursor so it moves smoothly even when the
+    # game's frame rate dips; draw it ourselves only if that isn't supported.
+    try:
+        pygame.mouse.set_cursor(pygame.cursors.Cursor((6, 91), cursor_image))
+        pygame.mouse.set_visible(True)
+        draw_cursor = False
+    except (pygame.error, AttributeError, TypeError):
+        draw_cursor = True
+    button_image       = button_image.convert_alpha()
+    button_hover_image = button_hover_image.convert_alpha()
+    button_image2      = button_image2.convert_alpha()
+    button_hover_image2= button_hover_image2.convert_alpha()
+    text_box_image     = text_box_image.convert_alpha()
 
 
     # ── Compositing layers ───────────────────────────────────────────────────
-    background_layer  = pygame.Surface((width, height))
-    text_layer        = pygame.Surface((width, height), pygame.SRCALPHA)
-    character_layer   = pygame.Surface((width, height), pygame.SRCALPHA)
-    front_layer       = pygame.Surface((width, height), pygame.SRCALPHA)
-    wizard_text_layer = pygame.Surface((width, height), pygame.SRCALPHA)
+    background_layer  = pygame.Surface((width, height)).convert()
+    text_layer        = Layer()
+    character_layer   = Layer()
+    front_layer       = Layer()
+    wizard_text_layer = Layer()
 
     def refresh():
-        screen.blit(background_layer,  (0, 0))
-        screen.blit(text_layer,        (0, 0))
-        screen.blit(character_layer,   (0, 0))
-        screen.blit(wizard_text_layer, (0, 0))
-        screen.blit(front_layer,       (0, 0))
+        screen.blit(background_layer, (0, 0))
+        text_layer.paint(screen)
+        character_layer.paint(screen)
+        wizard_text_layer.paint(screen)
+        front_layer.paint(screen)
 
     # ── Fonts ────────────────────────────────────────────────────────────────
     font_input = pygame.font.Font(FONT_PATH, 35)
@@ -495,7 +553,8 @@ async def main():
         button.draw()
 
         mx, my = pygame.mouse.get_pos()
-        front_layer.blit(cursor_image, (mx - 6, my - 91))
+        if draw_cursor:
+            front_layer.blit(cursor_image, (mx - 6, my - 91))
 
         wizard.draw(character_layer, screen)
         wizard.dialogue(wizard_dialogue, [
@@ -562,21 +621,23 @@ async def main():
         text_layer.fill((0, 0, 0, 0))
         wizard_text_layer.fill((0, 0, 0, 0))
 
-        if stage != PUZZLE_STAGE:  # "next page" appears once the puzzle is solved
+        # The page corner always shows, but only reacts once the puzzle is solved
+        if stage != PUZZLE_STAGE:
             button.check_hover()
-            button.draw()
+        button.draw()
 
         mx, my = pygame.mouse.get_pos()
-        front_layer.blit(cursor_image, (mx - 6, my - 91))
+        if draw_cursor:
+            front_layer.blit(cursor_image, (mx - 6, my - 91))
 
         for box in input_boxes:
-            box.draw(text_layer)
+            text_layer.defer(box.draw)
         if time.time() < wrong_answer_until:
             hint = font_input.render("Not quite... try again!", True, (170, 60, 60))
             text_layer.blit(hint, (input_box1.rect.x, input_box1.rect.bottom + 10))
 
         riddle.static(encrypted)
-        name.static("Ceaser cipher")
+        name.static("Caesar cipher")
         info.static(
             "The Caesar cipher is a substitution cipher that shifts each letter in a message "
             "by a fixed number of positions down the alphabet, such as turning 'A' into 'D' "
@@ -653,15 +714,17 @@ async def main():
         text_layer.fill((0, 0, 0, 0))
         wizard_text_layer.fill((0, 0, 0, 0))
 
-        if stage != PUZZLE_STAGE:  # "next page" appears once the puzzle is solved
+        # The page corner always shows, but only reacts once the puzzle is solved
+        if stage != PUZZLE_STAGE:
             button.check_hover()
-            button.draw()
+        button.draw()
 
         mx, my = pygame.mouse.get_pos()
-        front_layer.blit(cursor_image, (mx - 6, my - 91))
+        if draw_cursor:
+            front_layer.blit(cursor_image, (mx - 6, my - 91))
 
         for box in input_boxes:
-            box.draw(text_layer)
+            text_layer.defer(box.draw)
         if time.time() < wrong_answer_until:
             hint = font_input.render("Not quite... try again!", True, (170, 60, 60))
             text_layer.blit(hint, (input_box1.rect.x, input_box1.rect.bottom + 10))
@@ -734,7 +797,8 @@ async def main():
         button.draw()
 
         mx, my = pygame.mouse.get_pos()
-        front_layer.blit(cursor_image, (mx - 6, my - 91))
+        if draw_cursor:
+            front_layer.blit(cursor_image, (mx - 6, my - 91))
 
         wizard.draw(character_layer, screen)
         wizard.dialogue(wizard_dialogue, [
